@@ -1,0 +1,71 @@
+{
+    "accounts": [
+        {
+            "account": {
+                "cookie": "_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.|",
+                "opt_secret": ""
+            },
+
+            
+            "rolimon": {
+                "roli_verification_token": "",
+                "ads": {
+                    "sleep_time": 900,
+                    "offers": []
+                },
+                "limiteds_value_updater_sleep_time": 60,
+                "manual_rolimon_items": {
+                    "16477149823": ["Gold Clockwork Headphones", "GCWHP", 4924, 5000, 5000, 4, 2, -1, 1, -1]
+                }
+            },
+            "trade": {
+                "sleep_time": 0,
+                "items": {
+                    "not_for_trade": [],
+                    "not_accepting": []
+                },
+                "algorithm": {
+                    "modes": {
+                        "value_only": false,
+                        "trade_methods": ["upgrade", "downgrade"],
+                        "rap_only_base": false
+                    },
+                    "thresholds": {
+                        "min_receiving_value_when_downgrading": 1.13,
+                        "max_giving_value_when_upgrading": 1.1,
+                        "max_edge_value": 1.17,
+                        "min_trade_send_value_total": 0
+                    },
+                    "modifiers": {
+                        "base_divisor": 1000,
+                        "demand_multiplier": 100,
+                        "rare_multiplier": 50,
+                        "lower_rap_only_item": 0.9,
+                        "lower_projected_item": 0
+                    },
+                    "penalties": {
+                        "bulk_penalty_rate": 0.01,
+                        "upgrade_penalty_multiplier": 1
+                    },
+                    "performance": {
+                        "batch_size": 5000,
+                        "max_pairs": 500000
+                    },
+                    "upgrade": {
+                        "min_items": 3,
+                        "max_items": 4
+                    },
+                    "downgrade": {
+                        "min_items": 1,
+                        "max_items": 1
+                    },
+                    "item_ratio_constraints": {
+                        "max_item_ratio_upgrade": 0.6,
+                        "min_item_ratio_upgrade": 0.05
+                    }
+                }
+            },
+            "webhook": "https://discord.com/api/webhooks//"
+        }
+    ]
+}
