@@ -1,6 +1,7 @@
 import aiohttp
 import asyncio
 import random
+import time
 from datetime import datetime, timezone
 
 from . import algorithm
@@ -70,7 +71,7 @@ async def check_outbound(self):
                                 logging.error("🚨 Roblox cookie is invalid. Pausing outbound trade checker.")
                                 error_embed = await generate_error_embed("roblox_cookie")
                                 await self.send_webhook_notification(error_embed)
-                                await asyncio.sleep(3600) 
+                                await asyncio.sleep(3600)
 
                             logging.warning(f"⚠️ Failed to fetch outbound trades. Status: {response.status}")
                             break
@@ -112,12 +113,30 @@ async def check_inbound(self):
                                             logging.warning(f"⚠️ Failed to accept inbound trade {trade['id']}")
                                     else:
                                         logging.info(f"🔄 Searching for counter trade for trade {trade['id']}")
-                                        trade_data = await generate_trade(self, trade['user']['id'], True)
+
+                                        # Check if we can send a trade before generating one
+                                        can_send_trade = True
+                                        now = time.time()
+                                        self.trade_timestamps = [ts for ts in self.trade_timestamps if now - ts < self.TRADE_LIMIT_WINDOW]
+
+                                        if now < self.rate_limit_until:
+                                            logging.warning(f"🕒 Rate limited. Cannot send counter-trade. Next attempt possible in {int((self.rate_limit_until - now)/60)} minutes.")
+                                            can_send_trade = False
+                                        elif len(self.trade_timestamps) >= self.TRADE_LIMIT_COUNT:
+                                            logging.warning(f"🕒 Daily trade limit of {self.TRADE_LIMIT_COUNT} reached. Cannot counter.")
+                                            self.rate_limit_until = self.trade_timestamps[0] + self.TRADE_LIMIT_WINDOW
+                                            can_send_trade = False
+
+                                        trade_data = None
+                                        if can_send_trade:
+                                            trade_data = await generate_trade(self, trade['user']['id'], True)
 
                                         if trade_data:
                                             logging.info(f"✉️ Sending counter trade to user {trade['user']['id']}.")
                                             response_counter = await self.authenticator_client.counter_trade(TAG=self.cookie[-10:], TRADE_DATA=trade_data, TRADE_ID = trade["id"])
+
                                             if response_counter.status == 200:
+                                                self.trade_timestamps.append(time.time())
                                                 json_data_response = await response_counter.json()
                                                 logging.info(f"✅ Successfully countered inbound trade {trade['id']}")
                                                 async with aiohttp.ClientSession() as new_session:
@@ -125,16 +144,34 @@ async def check_inbound(self):
                                                         if trade_info_resp.status == 200:
                                                             trade_info_json = await trade_info_resp.json()
                                                             await self.send_webhook_notification(await generate_trade_content(self, trade_info_json))
+                                                continue # Skip declining and move to next inbound trade
+
+                                            elif response_counter.status == 429:
+                                                logging.error("❌ Failed to send counter-trade: Rate limited by Roblox (429).")
+                                                now = time.time()
+                                                self.trade_timestamps = [ts for ts in self.trade_timestamps if now - ts < self.TRADE_LIMIT_WINDOW]
+
+                                                if len(self.trade_timestamps) >= self.TRADE_LIMIT_COUNT:
+                                                    self.rate_limit_until = self.trade_timestamps[0] + self.TRADE_LIMIT_WINDOW
+                                                else: # Cold start case
+                                                    logging.warning("🕒 Rate limited on a cold start. Waiting 24 hours as a precaution.")
+                                                    self.rate_limit_until = now + self.TRADE_LIMIT_WINDOW
+
+                                                # Send embed notification
+                                                rate_limit_embed = await generate_rate_limit_embed(self.rate_limit_until)
+                                                await self.send_webhook_notification(rate_limit_embed)
+
                                             else:
                                                 logging.warning(f"⚠️ Failed to counter inbound trade {trade['id']}")
                                                 await self.send_webhook_notification({"content": f"Failed to counter trade. Response status: {response_counter.status}. https://www.roblox.com/trades#{str(trade['id'])}. Response json: {await response_counter.json()}"})
+
+                                        # Decline if no counter was found or if sending the counter failed
+                                        logging.info(f"🚫 No counter trade found for {trade['id']} or could not send. Declining.")
+                                        message, status = await decline(self, trade["id"])
+                                        if status == 200:
+                                            logging.info(f"✅ Successfully declined trade {trade['id']}.")
                                         else:
-                                            logging.info(f"🚫 No counter trade found for {trade['id']}. Declining.")
-                                            message, status = await decline(self, trade["id"])
-                                            if status == 200:
-                                                logging.info(f"✅ Successfully declined trade {trade['id']}.")
-                                            else:
-                                                logging.warning(f"⚠️ Failed to decline trade {trade['id']}: {message}")
+                                            logging.warning(f"⚠️ Failed to decline trade {trade['id']}: {message}")
                                 finally:
                                     await asyncio.sleep(self.sleep_time_trade_send)
 
@@ -147,7 +184,7 @@ async def check_inbound(self):
                                 logging.error("🚨 Roblox cookie is invalid. Pausing inbound trade checker.")
                                 error_embed = await generate_error_embed("roblox_cookie")
                                 await self.send_webhook_notification(error_embed)
-                                await asyncio.sleep(3600) 
+                                await asyncio.sleep(3600)
 
                             logging.warning(f"⚠️ Failed to fetch inbound trades. Status: {response.status}")
                             break
@@ -222,18 +259,18 @@ async def trades_watcher(self):
                                     json_data = await resp.json()
                                     await self.send_webhook_notification(await generate_trade_content(self, json_data))
 
-                        if scrape_type == "completed":
-                            try:
-                                await self.update_limiteds()
-                                if not getattr(self, 'rolimons_working', True):
-                                    self.rolimons_working = True
-                                    logging.info("✅ Rolimons data fetching has recovered.")
-                            except Exception as e:
-                                if getattr(self, 'rolimons_working', True):
-                                    self.rolimons_working = False
-                                    logging.error(f"❌ Failed to update limiteds, likely a Rolimons issue: {e}")
-                                    error_embed = await generate_error_embed("rolimons_failure")
-                                    await self.send_webhook_notification(error_embed)
+                if scrape_type == "completed":
+                    try:
+                        await self.update_limiteds()
+                        if not getattr(self, 'rolimons_working', True):
+                            self.rolimons_working = True
+                            logging.info("✅ Rolimons data fetching has recovered.")
+                    except Exception as e:
+                        if getattr(self, 'rolimons_working', True):
+                            self.rolimons_working = False
+                            logging.error(f"❌ Failed to update limiteds, likely a Rolimons issue: {e}")
+                            error_embed = await generate_error_embed("rolimons_failure")
+                            await self.send_webhook_notification(error_embed)
 
         except Exception as e:
             logging.error(f"An error occurred in trades_watcher loop: {e}")
@@ -272,7 +309,7 @@ async def generate_trade(self, user_id, counter=False):
             await self.send_webhook_notification(pause_embed)
 
         while len(all_my_items_raw) == 1 and all_my_items_raw[0].get("isOnHold", False):
-            logging.info("🔄 Item on hold. Waiting 60s before re-checking...")
+            logging.info("🔄 Item on hold. Waiting before re-checking...")
             await asyncio.sleep(10800)
             await self.update_limiteds()
             all_my_items_raw = [item for sublist in self.limiteds.values() for item in sublist]
@@ -344,7 +381,6 @@ async def generate_trade(self, user_id, counter=False):
         for _item in giver_items.copy():
             for item in best_trade["giving_items"].copy():
                 if item[0] == _item["name"]:
-
                     giving_item_uaids.append(_item["userAssetId"])
                     best_trade["giving_items"].remove(item)
                     break
@@ -377,12 +413,27 @@ async def generate_trade(self, user_id, counter=False):
         return {}
 
 async def send_trade(self, user_id):
+    # Check rate limit status before proceeding
+    now = time.time()
+    self.trade_timestamps = [ts for ts in self.trade_timestamps if now - ts < self.TRADE_LIMIT_WINDOW]
+
+    if now < self.rate_limit_until:
+        logging.warning(f"🕒 Rate limited. Cannot send trade. Next attempt possible in {int((self.rate_limit_until - now)/60)} minutes.")
+        return
+
+    if len(self.trade_timestamps) >= self.TRADE_LIMIT_COUNT:
+        self.rate_limit_until = self.trade_timestamps[0] + self.TRADE_LIMIT_WINDOW
+        logging.warning(f"🕒 Daily trade limit of {self.TRADE_LIMIT_COUNT} reached. Cannot send trade.")
+        return
+
     logging.info(f"🔄 Generating possible trades with user {user_id}")
     trade_data = await generate_trade(self, user_id, False)
     if trade_data:
         logging.info(f"✉️ Sending trade to user {user_id}.")
         response = await self.authenticator_client.send_trade(TAG=self.cookie[-10:], TRADE_DATA=trade_data)
+
         if response.status == 200:
+            self.trade_timestamps.append(time.time()) # Record successful trade
             trade_id = str((await response.json())['id'])
             logging.info(f"✅ Trade sent successfully. Trade ID: {trade_id}")
             async with aiohttp.ClientSession() as session:
@@ -390,9 +441,52 @@ async def send_trade(self, user_id):
                     if resp.status == 200:
                         json_data = await resp.json()
                         await self.send_webhook_notification(await generate_trade_content(self, json_data))
+
+        elif response.status == 429: # Rate limited
+            logging.error("❌ Failed to send trade: Rate limited by Roblox (429).")
+            now = time.time()
+            self.trade_timestamps = [ts for ts in self.trade_timestamps if now - ts < self.TRADE_LIMIT_WINDOW]
+
+            if len(self.trade_timestamps) >= self.TRADE_LIMIT_COUNT:
+                # We have enough local data to calculate the exact wait time
+                self.rate_limit_until = self.trade_timestamps[0] + self.TRADE_LIMIT_WINDOW
+            else:
+                # Cold start scenario: We hit a limit but don't have 100 trades logged.
+                logging.warning("🕒 Rate limited on a cold start or with incomplete data. Waiting 24 hours as a precaution.")
+                self.rate_limit_until = now + self.TRADE_LIMIT_WINDOW
+
+            # Send embed notification
+            rate_limit_embed = await generate_rate_limit_embed(self.rate_limit_until)
+            await self.send_webhook_notification(rate_limit_embed)
+
         else:
-            logging.error(f"❌ Failed to send trade to user {user_id}. Response status: {response.status}. Reponse json {str(await response.json())}")
-            await self.send_webhook_notification({"content": f"Failed to send trade to user: {str(user_id)}. Response status: {response.status} . Reponse json {str(await response.json())}"})
+            logging.error(f"❌ Failed to send trade to user {user_id}. Response status: {response.status}. Response json {str(await response.json())}")
+            await self.send_webhook_notification({"content": f"Failed to send trade to user: {str(user_id)}. Response status: {response.status} . Response json {str(await response.json())}"})
+
+async def generate_rate_limit_embed(rate_limit_until_timestamp):
+    """Generates a Discord embed for a 429 rate limit error."""
+    embed = {
+        "embeds": [{
+            "title": "🚨 Trade Rate Limit Reached",
+            "color": 0xFFCC00,
+            "description": "The bot has been temporarily paused from sending trades after hitting the Roblox rate limit (Error 429).",
+            "fields": [
+                {
+                    "name": "Resuming On",
+                    "value": f"<t:{int(rate_limit_until_timestamp)}:F>",
+                    "inline": True
+                },
+                {
+                    "name": "Time Remaining",
+                    "value": f"<t:{int(rate_limit_until_timestamp)}:R>",
+                    "inline": True
+                }
+            ],
+            "footer": {"text": "No action is needed. The bot will resume automatically."},
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }]
+    }
+    return embed
 
 async def generate_error_embed(error_type):
     """Generates a Discord embed for critical errors like expired cookies."""
@@ -460,7 +554,7 @@ async def generate_trade_content(self, data):
     user_id = data["user"]["id"]
 
     receiving = next(o for o in offers if o["user"]["id"] == user_id)
-    giving   = next(o for o in offers if o["user"]["id"] != user_id)
+    giving = next(o for o in offers if o["user"]["id"] != user_id)
 
     given_items = giving["userAssets"]
     received_items = receiving["userAssets"]
@@ -470,23 +564,23 @@ async def generate_trade_content(self, data):
     profit = received_rap - given_rap
 
     if len(received_items) < len(given_items):
-        trade_type = "Upgrade ☝"
-        color = 0xFF0000
+        trade_type = "Upgrade ☝️"
+        color = 0x00FF00
     elif len(received_items) > len(given_items):
         trade_type = "Downgrade 👎"
-        color = 0x00FF00
+        color = 0xFF0000
     else:
         trade_type = "Sidegrade ➖"
         color = 0xFFFF00
 
     given_names = "\n".join(
-        f"{item['name']} ({self.all_limiteds[str(item['assetId'])][3]})" if self.all_limiteds[str(item["assetId"])][3] != -1
-        else f"{item['name']} ({self.all_limiteds[str(item['assetId'])][2]})"
+        f"{item['name']} ({self.all_limiteds[str(item['assetId'])][3]:,})" if self.all_limiteds[str(item["assetId"])][3] != -1
+        else f"{item['name']} ({self.all_limiteds[str(item['assetId'])][2]:,})"
         for item in given_items
     )
     received_names = "\n".join(
-        f"{item['name']} ({self.all_limiteds[str(item['assetId'])][3]})" if self.all_limiteds[str(item["assetId"])][3] != -1
-        else f"{item['name']} ({self.all_limiteds[str(item['assetId'])][2]})"
+        f"{item['name']} ({self.all_limiteds[str(item['assetId'])][3]:,})" if self.all_limiteds[str(item["assetId"])][3] != -1
+        else f"{item['name']} ({self.all_limiteds[str(item['assetId'])][2]:,})"
         for item in received_items
     )
 
@@ -495,19 +589,19 @@ async def generate_trade_content(self, data):
     except ValueError:
         dt = datetime.strptime(data["created"], "%Y-%m-%dT%H:%M:%S%z")
 
-    timestamp = dt.strftime("%m/%d/%y, %I:%M %p").lstrip("0").replace(" 0", " ")
+    timestamp = f"<t:{int(dt.timestamp())}:F>"
 
     embed = {
         "embeds": [
             {
                 "title": f"{data['status']} Trade ({trade_type})",
                 "color": color,
+                "url": f"https://www.roblox.com/trades#{data['id']}",
                 "fields": [
-                    { "name": "Trade Type", "value": trade_type, "inline": True },
-                    { "name": "Items Given", "value": given_names or "None", "inline": True },
-                    { "name": "Items Received", "value": received_names or "None", "inline": True },
-                    { "name": "Profit (Rap)", "value": f"Given: {given_rap} | Received: {received_rap} | Profit: {profit}", "inline": False },
-                    { "name": "Timestamp", "value": timestamp, "inline": False }
+                    { "name": "Giving", "value": given_names or "None", "inline": True },
+                    { "name": "Receiving", "value": received_names or "None", "inline": True },
+                    { "name": "Profit (RAP)", "value": f"**Given:** {given_rap:,}\n**Received:** {received_rap:,}\n**Profit:** {profit:,}", "inline": False },
+                    { "name": "Created", "value": timestamp, "inline": False }
                 ]
             }
         ]
