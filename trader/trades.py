@@ -217,7 +217,21 @@ async def trade_info(self, trade_id):
                 for item in json_response["offers"][receiver_index]["userAssets"]:
                         if str(item["assetId"]) in self.all_limiteds:
                             item_ids_receiver.append(str(item["assetId"]))
-                            receiving_items.append(self.all_limiteds[str(item["assetId"])])
+                            
+                            item_data = self.all_limiteds[str(item["assetId"])]
+                            
+                            item_name = item_data[0]  # Item name is at index 0
+                            item_value = item_data[3] if item_data[3] != -1 else item_data[2] # Item value or RAP
+
+                            if "egg" in item_name.lower() and item_value < 680:
+                                logging.info(f"🥚 Applying egg rule to '{item_name}' (value: {item_value}). Treating as 0 Robux.")
+                                modified_item_data = list(item_data)
+                                modified_item_data[2] = 0  # Set RAP to 0
+                                modified_item_data[3] = 0  # Set Value to 0
+                                receiving_items.append(modified_item_data)
+                            else:
+                                receiving_items.append(item_data)
+
                         else:
                             return [], [], item_ids_giver, item_ids_receiver, json_response
 
@@ -338,7 +352,9 @@ async def generate_trade(self, user_id, counter=False):
         and int(item["assetId"]) not in self.item_ids_not_for_trade
     ]
 
-    receiver_limiteds_rolimon = [
+    # NEW EGG RULE START
+    # First, filter the receiver's items based on existing criteria
+    receiver_limiteds_rolimon_filtered = [
         self.all_limiteds[str(item["assetId"])]
         for item in receiver_items
         if str(item["assetId"]) in self.all_limiteds
@@ -346,6 +362,23 @@ async def generate_trade(self, user_id, counter=False):
         and not (self.algorithm["modes"]["value_only"] and self.all_limiteds[str(item["assetId"])][3] == 1)
         and int(item["assetId"]) not in self.item_ids_not_accepting
     ]
+    
+    # Second, process the filtered list to apply the egg rule
+    receiver_limiteds_rolimon = []
+    for item_data in receiver_limiteds_rolimon_filtered:
+        item_name = item_data[0] # Item name is at index 0
+        item_value = item_data[3] if item_data[3] != -1 else item_data[2] # Item value or RAP
+
+        if "egg" in item_name.lower() and item_value < 680:
+            logging.info(f"🥚 Applying egg rule to '{item_name}' (value: {item_value}) in trade generation. Treating as 0 Robux.")
+            modified_item_data = list(item_data)
+            modified_item_data[2] = 0 # Set RAP to 0
+            modified_item_data[3] = 0 # Set Value to 0
+            receiver_limiteds_rolimon.append(modified_item_data)
+        else:
+            receiver_limiteds_rolimon.append(item_data)
+    # NEW EGG RULE END
+
     mode = random.choice(self.algorithm["modes"]["trade_methods"])
     if mode == "upgrade":
         receiver_min = self.algorithm["downgrade"]["min_items"]
@@ -360,7 +393,7 @@ async def generate_trade(self, user_id, counter=False):
 
     best_trade = await algorithm.find_best_trade(
         giver_items=giver_limiteds_rolimon,
-        receiver_items=receiver_limiteds_rolimon,
+        receiver_items=receiver_limiteds_rolimon, # Use the newly processed list
         settings=self.algorithm,
         giver_max=giver_max,
         giver_min=giver_min,
