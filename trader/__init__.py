@@ -52,6 +52,10 @@ class bot:
         self.all_processed_trades = []
 
         self.item_price = {}
+        self.trade_timestamps = []
+        self.rate_limit_until = 0
+        self.TRADE_LIMIT_COUNT = 100
+        self.TRADE_LIMIT_WINDOW = 24 * 60 * 60 # 24 hours in seconds
 
     async def scrape_user_id(self):
         try:
