@@ -5,12 +5,15 @@ import time
 import json
 import aiofiles
 import logging
+from datetime import datetime
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from . import rolimon
 from . import user
 from . import trades
 from . import cookie
 from . import errors
+from . import database # <-- Import the new database module
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,6 +59,128 @@ class bot:
         self.rate_limit_until = 0
         self.TRADE_LIMIT_COUNT = 100
         self.TRADE_LIMIT_WINDOW = 24 * 60 * 60 # 24 hours in seconds
+        self.db_conn = None
+        self.scheduler = None
+
+    async def _init_database_and_collector(self):
+        """Initializes the database and starts the background data collection tasks."""
+        logging.info("Initializing data collector...")
+        try:
+            database.initialize_database()
+            self.db_conn = database.get_db_connection()
+            self.scheduler = AsyncIOScheduler()
+            
+            # Schedule the collection jobs
+            self.scheduler.add_job(self.fetch_and_store_market_data, 'interval', minutes=15, id='market_data_job')
+            self.scheduler.add_job(self.fetch_and_store_trade_history, 'interval', minutes=30, id='trade_history_job')
+            
+            self.scheduler.start()
+            logging.info("✅ Data collector has been scheduled and is running in the background.")
+        except Exception as e:
+            logging.error(f"❌ Failed to initialize data collector: {e}", exc_info=True)
+
+    async def fetch_and_store_market_data(self):
+        """Fetches and stores the latest item market data from Rolimon's."""
+        logging.info("COLLECTOR: Starting market data fetch...")
+        try:
+            items = await rolimon.limiteds()
+            if not items:
+                logging.warning("COLLECTOR: No item data was returned from Rolimon's. Skipping this run.")
+                return
+
+            timestamp = int(time.time())
+            records = [
+                (timestamp, int(item_id), data[0], data[3], data[2], data[5], data[6], data[7], data[8], data[9])
+                for item_id, data in items.items()
+            ]
+            
+            cursor = self.db_conn.cursor()
+            cursor.executemany("""
+                INSERT OR IGNORE INTO item_market_history 
+                (timestamp, item_id, item_name, value, rap, demand, trend, projected, hyped, rare) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, records)
+            self.db_conn.commit()
+            logging.info(f"COLLECTOR: Successfully stored {cursor.rowcount} new item market snapshots.")
+        except Exception as e:
+            logging.error(f"COLLECTOR: An error occurred during market data collection: {e}", exc_info=True)
+
+    async def fetch_and_store_trade_history(self):
+        """Fetches the bot's completed and inactive trades from Roblox."""
+        logging.info("COLLECTOR: Starting trade history fetch...")
+        async with aiohttp.ClientSession(cookies={".ROBLOSECURITY": self.cookie}) as session:
+            try:
+                for trade_type in ["Completed", "Inactive"]:
+                    logging.info(f"COLLECTOR: Checking for new '{trade_type}' trades...")
+                    url = f"https://trades.roblox.com/v1/trades/{trade_type.lower()}?sortOrder=Desc&limit=100"
+                    async with session.get(url) as response:
+                        if response.status != 200:
+                            logging.error(f"COLLECTOR: Failed to get {trade_type} trades. Status: {response.status}")
+                            continue
+                        
+                        data = await response.json()
+                        trades_list = data.get('data', [])
+                        if not trades_list:
+                            logging.info(f"COLLECTOR: No new '{trade_type}' trades found.")
+                            continue
+                        
+                        logging.info(f"COLLECTOR: Found {len(trades_list)} '{trade_type}' trades to process.")
+                        tasks = [self._process_and_store_trade(trade['id'], session) for trade in trades_list]
+                        await asyncio.gather(*tasks)
+
+            except Exception as e:
+                logging.error(f"COLLECTOR: An error occurred during trade history collection: {e}", exc_info=True)
+
+    async def _process_and_store_trade(self, trade_id: int, session: aiohttp.ClientSession):
+        """Fetches details for a single trade and stores it in the database."""
+        cursor = self.db_conn.cursor()
+        cursor.execute("SELECT 1 FROM trade_history WHERE trade_id = ?", (trade_id,))
+        if cursor.fetchone():
+            return # Trade already exists in DB
+
+        url = f"https://trades.roblox.com/v1/trades/{trade_id}"
+        async with session.get(url) as response:
+            if response.status != 200:
+                logging.warning(f"COLLECTOR: Could not fetch details for trade {trade_id}. Status: {response.status}")
+                return
+            
+            trade_data = await response.json()
+            partner = next((offer['user'] for offer in trade_data['offers'] if offer['user']['id'] != self.user_id), None)
+            if not partner:
+                logging.warning(f"COLLECTOR: Could not determine partner for trade {trade_id}. Skipping.")
+                return
+
+            giving_offer = next(offer for offer in trade_data['offers'] if offer['user']['id'] == self.user_id)
+            receiving_offer = next(offer for offer in trade_data['offers'] if offer['user']['id'] == partner['id'])
+
+            given_rap = sum(item.get('recentAveragePrice', 0) or 0 for item in giving_offer['userAssets'])
+            received_rap = sum(item.get('recentAveragePrice', 0) or 0 for item in receiving_offer['userAssets'])
+            profit = received_rap - given_rap
+            
+            trade_type = "Sidegrade"
+            if len(receiving_offer['userAssets']) < len(giving_offer['userAssets']):
+                trade_type = "Upgrade"
+            elif len(receiving_offer['userAssets']) > len(giving_offer['userAssets']):
+                trade_type = "Downgrade"
+
+            created_ts = int(datetime.fromisoformat(trade_data['created'].replace('Z', '+00:00')).timestamp())
+            
+            # <-- FIX: Use .get() to provide a fallback to the 'created' timestamp
+            updated_timestamp_str = trade_data.get('updated', trade_data['created']) 
+            updated_ts = int(datetime.fromisoformat(updated_timestamp_str.replace('Z', '+00:00')).timestamp())
+
+            cursor.execute("INSERT OR IGNORE INTO trade_history VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                           (trade_id, partner['id'], trade_data['status'], created_ts, updated_ts, profit, trade_type))
+
+            assets = []
+            for item in giving_offer['userAssets']:
+                assets.append((trade_id, item['assetId'], item['name'], 1, item.get('value'), item.get('recentAveragePrice')))
+            for item in receiving_offer['userAssets']:
+                assets.append((trade_id, item['assetId'], item['name'], 0, item.get('value'), item.get('recentAveragePrice')))
+            
+            cursor.executemany("INSERT INTO trade_assets (trade_id, asset_id, asset_name, is_giving, value, rap) VALUES (?, ?, ?, ?, ?, ?)", assets)
+            self.db_conn.commit()
+            logging.info(f"COLLECTOR: Successfully stored details for new trade {trade_id}.")
 
     async def scrape_user_id(self):
         try:
@@ -181,6 +306,7 @@ class bot:
         await self.scrape_user_id()
         await self.generate_xcsrf_token()
         await self.authenticator_client.add(self.user_id, self.opt_secret, self.cookie, self.cookie[-10:])
+        await self._init_database_and_collector() # <-- NEW LINE
         await self.update_limiteds()
 
         await asyncio.gather(
