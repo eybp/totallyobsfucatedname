@@ -648,7 +648,7 @@ async def generate_decision_webhook(self, decision: str, trade_id: int, partner_
         ]
     }
     return embed
-    
+
 async def generate_trade_content(self, data):
     offers = data["offers"]
     user_id = data["user"]["id"]
