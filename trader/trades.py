@@ -609,13 +609,13 @@ async def generate_decision_webhook(self, decision: str, trade_id: int, partner_
     profit = received_value - given_value
 
     given_names = "\n".join([
-        f"[{item['name']}]({f'https://www.rolimons.com/item/{item["assetId"]}'}) "
+        f"[{item['name']}](https://www.rolimons.com/item/{item['assetId']}) "
         f"({(self.all_limiteds[str(item['assetId'])][3] if self.all_limiteds[str(item['assetId'])][3] != -1 else self.all_limiteds[str(item['assetId'])][2]):,})"
         for item in giving_items
     ]) or "None"
 
     received_names = "\n".join([
-        f"[{item['name']}]({f'https://www.rolimons.com/item/{item["assetId"]}'}) "
+        f"[{item['name']}](https://www.rolimons.com/item/{item['assetId']}) "
         f"({(self.all_limiteds[str(item['assetId'])][3] if self.all_limiteds[str(item['assetId'])][3] != -1 else self.all_limiteds[str(item['assetId'])][2]):,})"
         for item in receiving_items
     ]) or "None"
@@ -648,7 +648,7 @@ async def generate_decision_webhook(self, decision: str, trade_id: int, partner_
         ]
     }
     return embed
-
+    
 async def generate_trade_content(self, data):
     offers = data["offers"]
     user_id = data["user"]["id"]
