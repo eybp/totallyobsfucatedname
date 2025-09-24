@@ -3,6 +3,7 @@ import asyncio
 import random
 import time
 from datetime import datetime, timezone
+from collections import defaultdict
 
 from . import algorithm
 from . import user
@@ -46,6 +47,9 @@ async def check_outbound(self):
                                 try:
                                     giving_items, receiving_items, item_ids_giver, item_ids_receiver, trade_json = await trade_info(self, trade["id"])
 
+                                    if not trade_json:
+                                        continue
+
                                     if not giving_items or not receiving_items:
                                         continue
 
@@ -54,6 +58,12 @@ async def check_outbound(self):
                                         message, status = await decline(self, trade["id"])
                                         if status == 200:
                                             logging.info(f"🚫 Declined losing outbound trade {trade['id']}")
+                                            partner_info = trade['user']
+                                            giver_raw_items = next(offer for offer in trade_json["offers"] if offer["user"]["id"] == self.user_id)['userAssets']
+                                            receiver_raw_items = next(offer for offer in trade_json["offers"] if offer["user"]["id"] == partner_info['id'])['userAssets']
+                                            reason = f"Cancelled as it's no longer favorable. Profit Score: `{receiving_score - giving_score:.2f}`."
+                                            webhook_payload = await generate_decision_webhook(self, "Cancelled Outbound", trade['id'], partner_info, giver_raw_items, receiver_raw_items, giving_score, receiving_score, reason)
+                                            await self.send_webhook_notification(webhook_payload)
                                         else:
                                             logging.warning(f"🛑 Failed to decline losing outbound trade {trade['id']}")
                                             await self.send_webhook_notification({"content": f"Failed to decline losing outbound trade. Reason: {message['errors'][0]['message']} Please cancel outbound trade as soon as possible. Giving score: `{giving_score}`, Receiving score: `{receiving_score}`. https://www.roblox.com/trades#{trade['id']}"})
@@ -102,6 +112,13 @@ async def check_inbound(self):
                                 try:
                                     giving_items, receiving_items, item_ids_giver, item_ids_receiver, trade_json = await trade_info(self, trade["id"])
 
+                                    if not trade_json:
+                                        continue
+
+                                    partner_info = trade['user']
+                                    giver_raw_items = next(offer for offer in trade_json["offers"] if offer["user"]["id"] == self.user_id)['userAssets']
+                                    receiver_raw_items = next(offer for offer in trade_json["offers"] if offer["user"]["id"] == partner_info['id'])['userAssets']
+
                                     if not giving_items or not receiving_items or any(int(item_id) in self.item_ids_not_for_trade for item_id in item_ids_giver) or any(int(item_id) in self.item_ids_not_accepting for item_id in item_ids_receiver):
                                         continue
 
@@ -109,12 +126,14 @@ async def check_inbound(self):
                                     if keep:
                                         if (await self.authenticator_client.accept_trade(TAG=self.cookie[-10:], TRADE_ID=trade["id"])).status == 200:
                                             logging.info(f"✅ Successfully accepted inbound trade {trade['id']}")
+                                            reason = f"Accepted due to favorable score. Profit Score: `{receiving_score - giving_score:.2f}`."
+                                            webhook_payload = await generate_decision_webhook(self, "Accepted", trade['id'], partner_info, giver_raw_items, receiver_raw_items, giving_score, receiving_score, reason)
+                                            await self.send_webhook_notification(webhook_payload)
                                         else:
                                             logging.warning(f"⚠️ Failed to accept inbound trade {trade['id']}")
                                     else:
                                         logging.info(f"🔄 Searching for counter trade for trade {trade['id']}")
-
-                                        # Check if we can send a trade before generating one
+                                        
                                         can_send_trade = True
                                         now = time.time()
                                         self.trade_timestamps = [ts for ts in self.trade_timestamps if now - ts < self.TRADE_LIMIT_WINDOW]
@@ -127,49 +146,36 @@ async def check_inbound(self):
                                             self.rate_limit_until = self.trade_timestamps[0] + self.TRADE_LIMIT_WINDOW
                                             can_send_trade = False
 
-                                        trade_data = None
+                                        trade_info_dict = None
                                         if can_send_trade:
-                                            trade_data = await generate_trade(self, trade['user']['id'], True)
+                                            trade_info_dict = await generate_trade(self, trade['user']['id'], True)
 
-                                        if trade_data:
+                                        if trade_info_dict:
                                             logging.info(f"✉️ Sending counter trade to user {trade['user']['id']}.")
-                                            response_counter = await self.authenticator_client.counter_trade(TAG=self.cookie[-10:], TRADE_DATA=trade_data, TRADE_ID = trade["id"])
+                                            response_counter = await self.authenticator_client.counter_trade(TAG=self.cookie[-10:], TRADE_DATA=trade_info_dict['trade_data'], TRADE_ID = trade["id"])
 
                                             if response_counter.status == 200:
                                                 self.trade_timestamps.append(time.time())
                                                 json_data_response = await response_counter.json()
-                                                logging.info(f"✅ Successfully countered inbound trade {trade['id']}")
-                                                async with aiohttp.ClientSession() as new_session:
-                                                    async with new_session.get(f"https://trades.roblox.com/v1/trades/{json_data_response['id']}", cookies={".ROBLOSECURITY": self.cookie}) as trade_info_resp:
-                                                        if trade_info_resp.status == 200:
-                                                            trade_info_json = await trade_info_resp.json()
-                                                            await self.send_webhook_notification(await generate_trade_content(self, trade_info_json))
-                                                continue # Skip declining and move to next inbound trade
+                                                counter_trade_id = json_data_response['id']
+                                                logging.info(f"✅ Successfully countered inbound trade {trade['id']} with new trade {counter_trade_id}")
 
-                                            elif response_counter.status == 429:
-                                                logging.error("❌ Failed to send counter-trade: Rate limited by Roblox (429).")
-                                                now = time.time()
-                                                self.trade_timestamps = [ts for ts in self.trade_timestamps if now - ts < self.TRADE_LIMIT_WINDOW]
+                                                decline_reason = f"Original trade was unfavorable (Profit Score: `{receiving_score - giving_score:.2f}`). Sent counter-offer instead."
+                                                decline_webhook = await generate_decision_webhook(self, "Declined", trade['id'], partner_info, giver_raw_items, receiver_raw_items, giving_score, receiving_score, decline_reason)
+                                                await self.send_webhook_notification(decline_webhook)
 
-                                                if len(self.trade_timestamps) >= self.TRADE_LIMIT_COUNT:
-                                                    self.rate_limit_until = self.trade_timestamps[0] + self.TRADE_LIMIT_WINDOW
-                                                else: # Cold start case
-                                                    logging.warning("🕒 Rate limited on a cold start. Waiting 24 hours as a precaution.")
-                                                    self.rate_limit_until = now + self.TRADE_LIMIT_WINDOW
-
-                                                # Send embed notification
-                                                rate_limit_embed = await generate_rate_limit_embed(self.rate_limit_until)
-                                                await self.send_webhook_notification(rate_limit_embed)
-
-                                            else:
-                                                logging.warning(f"⚠️ Failed to counter inbound trade {trade['id']}")
-                                                await self.send_webhook_notification({"content": f"Failed to counter trade. Response status: {response_counter.status}. https://www.roblox.com/trades#{str(trade['id'])}. Response json: {await response_counter.json()}"})
-
-                                        # Decline if no counter was found or if sending the counter failed
-                                        logging.info(f"🚫 No counter trade found for {trade['id']} or could not send. Declining.")
+                                                counter_reason = f"Sent as a counter-offer. Profit Score: `{trade_info_dict['receiving_score'] - trade_info_dict['giving_score']:.2f}`."
+                                                counter_webhook = await generate_decision_webhook(self, "Countered", counter_trade_id, partner_info, trade_info_dict['giving_items_raw'], trade_info_dict['receiving_items_raw'], trade_info_dict['giving_score'], trade_info_dict['receiving_score'], counter_reason)
+                                                await self.send_webhook_notification(counter_webhook)
+                                                
+                                                continue
+                                        
+                                        reason_for_decline = f"Declined due to unfavorable score. Profit Score: `{receiving_score - giving_score:.2f}`."
                                         message, status = await decline(self, trade["id"])
                                         if status == 200:
                                             logging.info(f"✅ Successfully declined trade {trade['id']}.")
+                                            webhook_payload = await generate_decision_webhook(self, "Declined", trade['id'], partner_info, giver_raw_items, receiver_raw_items, giving_score, receiving_score, reason_for_decline)
+                                            await self.send_webhook_notification(webhook_payload)
                                         else:
                                             logging.warning(f"⚠️ Failed to decline trade {trade['id']}: {message}")
                                 finally:
@@ -220,14 +226,14 @@ async def trade_info(self, trade_id):
                             
                             item_data = self.all_limiteds[str(item["assetId"])]
                             
-                            item_name = item_data[0]  # Item name is at index 0
-                            item_value = item_data[3] if item_data[3] != -1 else item_data[2] # Item value or RAP
+                            item_name = item_data[0]
+                            item_value = item_data[3] if item_data[3] != -1 else item_data[2]
 
                             if "egg" in item_name.lower() and item_value < 680:
                                 logging.info(f"🥚 Applying egg rule to '{item_name}' (value: {item_value}). Treating as 0 Robux.")
                                 modified_item_data = list(item_data)
-                                modified_item_data[2] = 0  # Set RAP to 0
-                                modified_item_data[3] = 0  # Set Value to 0
+                                modified_item_data[2] = 0
+                                modified_item_data[3] = 0
                                 receiving_items.append(modified_item_data)
                             else:
                                 receiving_items.append(item_data)
@@ -334,14 +340,14 @@ async def generate_trade(self, user_id, counter=False):
             resume_embed = await generate_holding_period_embed("resumed")
             await self.send_webhook_notification(resume_embed)
 
-    receiver_items = await user.scrape_collectibles(self.cookie, user_id)
-    giver_items = self.limiteds.copy()
-    if not receiver_items or not giver_items:
+    receiver_items_dict = await user.scrape_collectibles(self.cookie, user_id)
+    giver_items_dict = self.limiteds.copy()
+    if not receiver_items_dict or not giver_items_dict:
         logging.warning(f"⚠️ No items available for trade with user {user_id}.")
-        return {}
+        return None
 
-    receiver_items = [item for sublist in receiver_items.values() for item in sublist if not item["isOnHold"]]
-    giver_items = [item for sublist in giver_items.values() for item in sublist if not item["isOnHold"]]
+    receiver_items = [item for sublist in receiver_items_dict.values() for item in sublist if not item["isOnHold"]]
+    giver_items = [item for sublist in giver_items_dict.values() for item in sublist if not item["isOnHold"]]
 
     giver_limiteds_rolimon = [
         self.all_limiteds[str(item["assetId"])]
@@ -352,8 +358,6 @@ async def generate_trade(self, user_id, counter=False):
         and int(item["assetId"]) not in self.item_ids_not_for_trade
     ]
 
-    # NEW EGG RULE START
-    # First, filter the receiver's items based on existing criteria
     receiver_limiteds_rolimon_filtered = [
         self.all_limiteds[str(item["assetId"])]
         for item in receiver_items
@@ -363,42 +367,34 @@ async def generate_trade(self, user_id, counter=False):
         and int(item["assetId"]) not in self.item_ids_not_accepting
     ]
     
-    # Second, process the filtered list to apply the egg rule
     receiver_limiteds_rolimon = []
     for item_data in receiver_limiteds_rolimon_filtered:
-        item_name = item_data[0] # Item name is at index 0
-        item_value = item_data[3] if item_data[3] != -1 else item_data[2] # Item value or RAP
+        item_name = item_data[0]
+        item_value = item_data[3] if item_data[3] != -1 else item_data[2]
 
         if "egg" in item_name.lower() and item_value < 680:
             logging.info(f"🥚 Applying egg rule to '{item_name}' (value: {item_value}) in trade generation. Treating as 0 Robux.")
             modified_item_data = list(item_data)
-            modified_item_data[2] = 0 # Set RAP to 0
-            modified_item_data[3] = 0 # Set Value to 0
+            modified_item_data[2] = 0
+            modified_item_data[3] = 0
             receiver_limiteds_rolimon.append(modified_item_data)
         else:
             receiver_limiteds_rolimon.append(item_data)
-    # NEW EGG RULE END
 
     mode = random.choice(self.algorithm["modes"]["trade_methods"])
     if mode == "upgrade":
-        receiver_min = self.algorithm["downgrade"]["min_items"]
-        receiver_max = self.algorithm["downgrade"]["max_items"]
-        giver_min = self.algorithm["upgrade"]["min_items"]
-        giver_max = self.algorithm["upgrade"]["max_items"]
+        receiver_min, receiver_max = self.algorithm["downgrade"]["min_items"], self.algorithm["downgrade"]["max_items"]
+        giver_min, giver_max = self.algorithm["upgrade"]["min_items"], self.algorithm["upgrade"]["max_items"]
     else:
-        receiver_min = self.algorithm["upgrade"]["min_items"]
-        receiver_max = self.algorithm["upgrade"]["max_items"]
-        giver_min = self.algorithm["downgrade"]["min_items"]
-        giver_max = self.algorithm["downgrade"]["max_items"]
+        receiver_min, receiver_max = self.algorithm["upgrade"]["min_items"], self.algorithm["upgrade"]["max_items"]
+        giver_min, giver_max = self.algorithm["downgrade"]["min_items"], self.algorithm["downgrade"]["max_items"]
 
-    best_trade = await algorithm.find_best_trade(
+    best_trade_info = await algorithm.find_best_trade(
         giver_items=giver_limiteds_rolimon,
-        receiver_items=receiver_limiteds_rolimon, # Use the newly processed list
+        receiver_items=receiver_limiteds_rolimon,
         settings=self.algorithm,
-        giver_max=giver_max,
-        giver_min=giver_min,
-        receiver_min=receiver_min,
-        receiver_max=receiver_max,
+        giver_max=giver_max, giver_min=giver_min,
+        receiver_min=receiver_min, receiver_max=receiver_max,
         allow_edge=True,
         batch_size=self.algorithm["performance"]["batch_size"],
         max_pairs=self.algorithm["performance"]["max_pairs"],
@@ -406,47 +402,55 @@ async def generate_trade(self, user_id, counter=False):
         min_trade_send_value_total=self.algorithm["thresholds"]["min_trade_send_value_total"] if not counter else 0
     )
 
-    if best_trade:
+    if best_trade_info:
         logging.info(f"✅ Best trade found for user {user_id}. Preparing trade data.")
-        giving_item_uaids = []
-        receiving_item_uaids = []
+        best_trade = best_trade_info['trade']
+        
+        giving_uaids_map = defaultdict(list)
+        for item in giver_items:
+            giving_uaids_map[item['name']].append(item)
+            
+        receiving_uaids_map = defaultdict(list)
+        for item in receiver_items:
+            receiving_uaids_map[item['name']].append(item)
 
-        for _item in giver_items.copy():
-            for item in best_trade["giving_items"].copy():
-                if item[0] == _item["name"]:
-                    giving_item_uaids.append(_item["userAssetId"])
-                    best_trade["giving_items"].remove(item)
-                    break
-        for _item in receiver_items:
-            for item in best_trade["receiving_items"].copy():
-                if item[0] == _item["name"]:
-                    receiving_item_uaids.append(_item["userAssetId"])
-                    best_trade["receiving_items"].remove(item)
-                    break
+        giving_item_uaids, giving_items_raw_list = [], []
+        for item in best_trade["giving_items"]:
+            item_name = item[0]
+            if giving_uaids_map[item_name]:
+                raw_item = giving_uaids_map[item_name].pop(0)
+                giving_item_uaids.append(raw_item['userAssetId'])
+                giving_items_raw_list.append(raw_item)
+                
+        receiving_item_uaids, receiving_items_raw_list = [], []
+        for item in best_trade["receiving_items"]:
+            item_name = item[0]
+            if receiving_uaids_map[item_name]:
+                raw_item = receiving_uaids_map[item_name].pop(0)
+                receiving_item_uaids.append(raw_item['userAssetId'])
+                receiving_items_raw_list.append(raw_item)
 
         if not receiving_item_uaids or not giving_item_uaids:
-            return {}
+            return None
 
         data_json = {
             "offers": [
-                {
-                    "userId": self.user_id,
-                    "userAssetIds": giving_item_uaids,
-                    "robux": 0
-                },
-                {
-                    "userId": user_id,
-                    "userAssetIds": receiving_item_uaids,
-                    "robux": 0
-                }
+                {"userId": self.user_id, "userAssetIds": giving_item_uaids, "robux": 0},
+                {"userId": user_id, "userAssetIds": receiving_item_uaids, "robux": 0}
             ]
         }
-        return data_json
+        return {
+            'trade_data': data_json,
+            'giving_items_raw': giving_items_raw_list,
+            'receiving_items_raw': receiving_items_raw_list,
+            'giving_score': best_trade_info['giving_score'],
+            'receiving_score': best_trade_info['receiving_score']
+        }
     else:
-        return {}
+        return None
+
 
 async def send_trade(self, user_id):
-    # Check rate limit status before proceeding
     now = time.time()
     self.trade_timestamps = [ts for ts in self.trade_timestamps if now - ts < self.TRADE_LIMIT_WINDOW]
 
@@ -460,38 +464,43 @@ async def send_trade(self, user_id):
         return
 
     logging.info(f"🔄 Generating possible trades with user {user_id}")
-    trade_data = await generate_trade(self, user_id, False)
-    if trade_data:
+    trade_info_dict = await generate_trade(self, user_id, False)
+    if trade_info_dict:
+        trade_data = trade_info_dict['trade_data']
         logging.info(f"✉️ Sending trade to user {user_id}.")
         response = await self.authenticator_client.send_trade(TAG=self.cookie[-10:], TRADE_DATA=trade_data)
 
         if response.status == 200:
-            self.trade_timestamps.append(time.time()) # Record successful trade
-            trade_id = str((await response.json())['id'])
+            self.trade_timestamps.append(time.time())
+            trade_id = (await response.json())['id']
             logging.info(f"✅ Trade sent successfully. Trade ID: {trade_id}")
+            
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"https://trades.roblox.com/v1/trades/{trade_id}", cookies={".ROBLOSECURITY": self.cookie}) as resp:
-                    if resp.status == 200:
-                        json_data = await resp.json()
-                        await self.send_webhook_notification(await generate_trade_content(self, json_data))
+                async with session.get(f"https://users.roblox.com/v1/users/{user_id}") as user_resp:
+                    partner_info = {'id': user_id, 'name': 'N/A'}
+                    if user_resp.status == 200:
+                        user_data = await user_resp.json()
+                        partner_info = {'id': user_data['id'], 'name': user_data['name']}
+            
+            reason = f"Sent a new outbound trade. Profit Score: `{trade_info_dict['receiving_score'] - trade_info_dict['giving_score']:.2f}`."
+            webhook_payload = await generate_decision_webhook(
+                self, "Sent", trade_id, partner_info, 
+                trade_info_dict['giving_items_raw'], trade_info_dict['receiving_items_raw'],
+                trade_info_dict['giving_score'], trade_info_dict['receiving_score'], reason
+            )
+            await self.send_webhook_notification(webhook_payload)
 
-        elif response.status == 429: # Rate limited
+        elif response.status == 429:
             logging.error("❌ Failed to send trade: Rate limited by Roblox (429).")
             now = time.time()
             self.trade_timestamps = [ts for ts in self.trade_timestamps if now - ts < self.TRADE_LIMIT_WINDOW]
-
             if len(self.trade_timestamps) >= self.TRADE_LIMIT_COUNT:
-                # We have enough local data to calculate the exact wait time
                 self.rate_limit_until = self.trade_timestamps[0] + self.TRADE_LIMIT_WINDOW
             else:
-                # Cold start scenario: We hit a limit but don't have 100 trades logged.
-                logging.warning("🕒 Rate limited on a cold start or with incomplete data. Waiting 24 hours as a precaution.")
+                logging.warning("🕒 Rate limited on a cold start. Waiting 24 hours as a precaution.")
                 self.rate_limit_until = now + self.TRADE_LIMIT_WINDOW
-
-            # Send embed notification
             rate_limit_embed = await generate_rate_limit_embed(self.rate_limit_until)
             await self.send_webhook_notification(rate_limit_embed)
-
         else:
             logging.error(f"❌ Failed to send trade to user {user_id}. Response status: {response.status}. Response json {str(await response.json())}")
             await self.send_webhook_notification({"content": f"Failed to send trade to user: {str(user_id)}. Response status: {response.status} . Response json {str(await response.json())}"})
@@ -580,6 +589,64 @@ async def generate_holding_period_embed(status, item_name=None):
     else:
         return {}
 
+    return embed
+
+async def generate_decision_webhook(self, decision: str, trade_id: int, partner_info: dict, giving_items: list, receiving_items: list, giving_score: float, receiving_score: float, reason: str):
+    """Generates a comprehensive webhook embed explaining a trade decision."""
+    
+    decision_map = {
+        "Accepted": {"color": 0x4CAF50, "title": f"✅ Accepted Inbound Trade"},
+        "Declined": {"color": 0xF44336, "title": f"🚫 Declined Trade"},
+        "Countered": {"color": 0xFF9800, "title": f"🔄 Sent Counter-Offer"},
+        "Sent": {"color": 0x2196F3, "title": f"✉️ Sent Outbound Trade"},
+        "Cancelled Outbound": {"color": 0xF44336, "title": f"❌ Cancelled Outbound Trade"},
+    }
+    
+    config = decision_map.get(decision, {"color": 0x9E9E9E, "title": f"Trade Action: {decision}"})
+    
+    given_value = sum(self.all_limiteds[str(item["assetId"])][3] if self.all_limiteds[str(item["assetId"])][3] != -1 else self.all_limiteds[str(item["assetId"])][2] for item in giving_items)
+    received_value = sum(self.all_limiteds[str(item["assetId"])][3] if self.all_limiteds[str(item["assetId"])][3] != -1 else self.all_limiteds[str(item["assetId"])][2] for item in receiving_items)
+    profit = received_value - given_value
+
+    given_names = "\n".join([
+        f"[{item['name']}]({f'https://www.rolimons.com/item/{item["assetId"]}'}) "
+        f"({(self.all_limiteds[str(item['assetId'])][3] if self.all_limiteds[str(item['assetId'])][3] != -1 else self.all_limiteds[str(item['assetId'])][2]):,})"
+        for item in giving_items
+    ]) or "None"
+
+    received_names = "\n".join([
+        f"[{item['name']}]({f'https://www.rolimons.com/item/{item["assetId"]}'}) "
+        f"({(self.all_limiteds[str(item['assetId'])][3] if self.all_limiteds[str(item['assetId'])][3] != -1 else self.all_limiteds[str(item['assetId'])][2]):,})"
+        for item in receiving_items
+    ]) or "None"
+
+    embed = {
+        "embeds": [
+            {
+                "title": config["title"],
+                "color": config["color"],
+                "url": f"https://www.roblox.com/trades#{trade_id}",
+                "description": f"**Reason:** {reason}",
+                "fields": [
+                    {"name": "Partner", "value": f"[{partner_info['name']}]({f'https://www.roblox.com/users/{partner_info["id"]}/profile'}) (`{partner_info['id']}`)", "inline": False},
+                    {"name": "Giving", "value": given_names, "inline": True},
+                    {"name": "Receiving", "value": received_names, "inline": True},
+                    {
+                        "name": "Algorithm Analysis",
+                        "value": f"Giving Score: `{giving_score:.2f}`\nReceiving Score: `{receiving_score:.2f}`\n**Profit Score:** `{receiving_score - giving_score:.2f}`",
+                        "inline": False
+                    },
+                    {
+                        "name": "Value Analysis (Rolimon's)",
+                        "value": f"Giving Value: `{given_value:,}`\nReceiving Value: `{received_value:,}`\n**Profit:** `{profit:,}`",
+                        "inline": False
+                    }
+                ],
+                "footer": {"text": f"Trade ID: {trade_id}"},
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        ]
+    }
     return embed
 
 async def generate_trade_content(self, data):
