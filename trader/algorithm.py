@@ -181,9 +181,10 @@ async def generate_possible_trades(
 
                         if max_pairs and len(trades) >= max_pairs:
                             return trades
-        return trades
     except:
         return []
+    return trades
+
 
 async def batch_evaluate_trade(trade, settings, allow_edge=False):
     giving_items = trade['giving_items']
@@ -222,11 +223,12 @@ async def find_best_trade(
     all_possible_trades = sorted(
         all_possible_trades,
         key=lambda trade: sum([item[ITEM_VALUE] if item[ITEM_VALUE] != -1 else item[ITEM_RAP] for item in trade['receiving_items']]) -
-                          sum([item[ITEM_VALUE] if item[ITEM_VALUE] != -1 else item[ITEM_RAP] for item in trade['giving_items']]),
+                        sum([item[ITEM_VALUE] if item[ITEM_VALUE] != -1 else item[ITEM_RAP] for item in trade['giving_items']]),
         reverse=True
     )
-    best_trade = None
-    best_score = -float('inf')
+    
+    best_trade_info = None
+    best_profit_score = 0
     results = []
 
     loop = asyncio.get_event_loop()
@@ -235,7 +237,6 @@ async def find_best_trade(
         batch_results = await loop.run_in_executor(
             executor, sync_batch_eval, batch, settings, allow_edge
         )
-
         results.extend(batch_results)
 
     for result in results:
@@ -243,8 +244,15 @@ async def find_best_trade(
         decision = result['decision']
         giving_score = result['giving_score']
         receiving_score = result['receiving_score']
-        if decision == 1 and giving_score - receiving_score > best_score:
-            best_score = giving_score - receiving_score
-            best_trade = trade
+        
+        profit_score = receiving_score - giving_score
+        
+        if decision == 1 and profit_score > best_profit_score:
+            best_profit_score = profit_score
+            best_trade_info = {
+                'trade': trade,
+                'giving_score': giving_score,
+                'receiving_score': receiving_score
+            }
 
-    return best_trade if best_score < 0 else None
+    return best_trade_info
