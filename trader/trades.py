@@ -628,7 +628,7 @@ async def generate_decision_webhook(self, decision: str, trade_id: int, partner_
                 "url": f"https://www.roblox.com/trades#{trade_id}",
                 "description": f"**Reason:** {reason}",
                 "fields": [
-                    {"name": "Partner", "value": f"[{partner_info['name']}]({f'https://www.roblox.com/users/{partner_info["id"]}/profile'}) (`{partner_info['id']}`)", "inline": False},
+                    {"name": "Partner", "value": f"[{partner_info['name']}](https://www.roblox.com/users/{partner_info['id']}/profile) (`{partner_info['id']}`)", "inline": False},
                     {"name": "Giving", "value": given_names, "inline": True},
                     {"name": "Receiving", "value": received_names, "inline": True},
                     {
