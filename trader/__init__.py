@@ -64,20 +64,21 @@ class bot:
 
     async def _init_database_and_collector(self):
         """Initializes the database and starts the background data collection tasks."""
-        logging.info("Initializing data collector...")
-        try:
-            database.initialize_database()
-            self.db_conn = database.get_db_connection()
-            self.scheduler = AsyncIOScheduler()
-            
-            # Schedule the collection jobs
-            self.scheduler.add_job(self.fetch_and_store_market_data, 'interval', minutes=15, id='market_data_job')
-            self.scheduler.add_job(self.fetch_and_store_trade_history, 'interval', minutes=30, id='trade_history_job')
-            
-            self.scheduler.start()
-            logging.info("✅ Data collector has been scheduled and is running in the background.")
-        except Exception as e:
-            logging.error(f"❌ Failed to initialize data collector: {e}", exc_info=True)
+        logging.info("Data collector is DISABLED.")
+        # logging.info("Initializing data collector...")
+        # try:
+        #     database.initialize_database()
+        #     self.db_conn = database.get_db_connection()
+        #     self.scheduler = AsyncIOScheduler()
+        #     
+        #     # Schedule the collection jobs
+        #     self.scheduler.add_job(self.fetch_and_store_market_data, 'interval', minutes=15, id='market_data_job')
+        #     self.scheduler.add_job(self.fetch_and_store_trade_history, 'interval', minutes=30, id='trade_history_job')
+        #     
+        #     self.scheduler.start()
+        #     logging.info("✅ Data collector has been scheduled and is running in the background.")
+        # except Exception as e:
+        #     logging.error(f"❌ Failed to initialize data collector: {e}", exc_info=True)
 
     async def fetch_and_store_market_data(self):
         """Fetches and stores the latest item market data from Rolimon's."""
@@ -306,7 +307,7 @@ class bot:
         await self.scrape_user_id()
         await self.generate_xcsrf_token()
         await self.authenticator_client.add(self.user_id, self.opt_secret, self.cookie, self.cookie[-10:])
-        await self._init_database_and_collector() # <-- NEW LINE
+        # await self._init_database_and_collector() # <-- DATA COLLECTOR DISABLED
         await self.update_limiteds()
 
         await asyncio.gather(
