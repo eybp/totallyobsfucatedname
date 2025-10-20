@@ -493,12 +493,19 @@ async def send_trade(self, user_id):
         elif response.status == 429:
             logging.error("❌ Failed to send trade: Rate limited by Roblox (429).")
             now = time.time()
+            
+            # This corrects the flaw. The rate limit pause should always be set 
+            # for 24 hours *from now* when a 429 error occurs.
+            self.rate_limit_until = now + self.TRADE_LIMIT_WINDOW
+
+            # Clean the timestamp list to accurately check the reason for the log
             self.trade_timestamps = [ts for ts in self.trade_timestamps if now - ts < self.TRADE_LIMIT_WINDOW]
+            
             if len(self.trade_timestamps) >= self.TRADE_LIMIT_COUNT:
-                self.rate_limit_until = self.trade_timestamps[0] + self.TRADE_LIMIT_WINDOW
+                logging.warning(f"🕒 Daily trade limit of {self.TRADE_LIMIT_COUNT} was hit. Pausing for 24 hours.")
             else:
-                logging.warning("🕒 Rate limited on a cold start. Waiting 24 hours as a precaution.")
-                self.rate_limit_until = now + self.TRADE_LIMIT_WINDOW
+                logging.warning("🕒 Rate limited by Roblox (429) on a cold start. Pausing for 24 hours as a precaution.")
+            
             rate_limit_embed = await generate_rate_limit_embed(self.rate_limit_until)
             await self.send_webhook_notification(rate_limit_embed)
         else:
