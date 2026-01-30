@@ -45,6 +45,7 @@ Example structure:
             },
             "rolimon": {
                 "roli_verification_token": "YOUR_ROLI_TOKEN",
+                "max_trade_ads": 1000,
                 "ads": {
                     "sleep_time": 900,
                     "offers": []
