@@ -2,6 +2,7 @@ import aiohttp
 from collections import deque
 import asyncio
 import logging
+import time
 from typing import Dict, Union, Optional
 
 from .models import item
@@ -9,6 +10,12 @@ from .data_types import item_types
 from .helpers import JSVariableExtractor, pass_session
 from . import errors
 from . import trades
+
+# --- GLOBAL CACHE ---
+# Stores {user_id: (timestamp, ad_count)}
+AD_COUNT_CACHE = {}
+CACHE_TTL = 600  # Keep ad counts for 10 minutes
+# --------------------
 
 async def post_ad(roli_verification, player_id, offer_item_ids, request_item_ids, request_tags):
     async with aiohttp.ClientSession() as session:
@@ -101,28 +108,52 @@ async def limiteds():
 async def get_player_ad_count(user_id):
     """
     Fetches the user's Rolimons profile to get their current active trade ad count.
+    Includes caching and Mandatory Rate Limiting.
     """
+    current_time = time.time()
+    
+    # 1. Check Cache
+    if user_id in AD_COUNT_CACHE:
+        timestamp, count = AD_COUNT_CACHE[user_id]
+        if current_time - timestamp < CACHE_TTL:
+            return count
+
+    # 2. Fetch from API
     url = f"https://www.rolimons.com/player/{user_id}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
+                
+                # CRITICAL: Always sleep after a request to prevent bursting
+                # We sleep BEFORE returning to ensure the caller waits
+                await asyncio.sleep(3.0) 
+
                 if response.status == 200:
                     response_text = await response.text()
                     extractor = JSVariableExtractor(response_text)
                     extracted_variables = extractor.extract()
                     
-                    # rolimons stores player details in "player_details_data" 
                     if "player_details_data" in extracted_variables:
                         data = extracted_variables["player_details_data"].value
-                        return data.get("trade_ad_count", 0)
+                        count = data.get("trade_ad_count", 0)
+                        
+                        # Update Cache
+                        AD_COUNT_CACHE[user_id] = (current_time, count)
+                        return count
+                elif response.status == 429:
+                    logging.warning(f"⚠️ 429 Too Many Requests from Rolimons for user {user_id}. Cooling down...")
+                    await asyncio.sleep(30) # Long sleep on 429
+                    return 9999 # Return high number to skip this user safely
+
     except Exception as e:
         logging.error(f"❌ Error fetching trade ad count for user {user_id}: {e}")
+        await asyncio.sleep(5) # Sleep on error too
     
-    # assume no ads
-    return 0
+    return 9999 # Default to high number on failure to be safe (don't trade unknown users)
 
 async def track_trade_ads(self):
     seen_ids = deque(maxlen=500)
+    logging.info(f"👀 Trade Ad Tracker started. Filter: Users with <= {self.max_trade_ads} active ads.")
     while True:
         try:
             async with aiohttp.ClientSession() as session:
@@ -138,16 +169,21 @@ async def track_trade_ads(self):
                                 user_id = trade_ad[2]
                                 if user_id not in seen_ids:
                                     seen_ids.append(user_id)
-                                    # filter by trade ad counts
+                                    
+                                    # This call is now safe and throttled internally
                                     logging.info(f"🔍 [Ad Check] Checking ad count for user {user_id}...")
                                     ad_count = await get_player_ad_count(user_id)
+                                    
                                     if ad_count > self.max_trade_ads:
                                         logging.info(f"🚫 [Ad Check] Skipped user {user_id}. Ads: {ad_count} > Limit: {self.max_trade_ads}")
                                         continue
                                         
                                     logging.info(f"✅ [Ad Check] Target found: {user_id} (Ads: {ad_count}). Sending trade.")
                                     await trades.send_trade(self, user_id)
+                                    
+                                    # Additional small sleep between trade attempts
                                     await asyncio.sleep(self.sleep_time_trade_send)
+                                    
                     except aiohttp.ClientError:
                         break
 
