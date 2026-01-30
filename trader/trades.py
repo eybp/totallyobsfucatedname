@@ -46,10 +46,11 @@ async def check_outbound(self):
                             json_data = await response.json()
                             for trade in json_data.get("data", []):
                                 try:
+                                    # --- CHECK AD COUNT (Throttled via rolimon.py) ---
                                     partner_info = trade['user']
                                     partner_id = partner_info['id']
                                     
-                                    logging.info(f"🔍 [Outbound] Checking ad count for partner {partner_id}...")
+                                    # This call will now sleep for 3s if it hits the API
                                     ad_count = await rolimon.get_player_ad_count(partner_id)
 
                                     if ad_count > self.max_trade_ads:
@@ -58,6 +59,7 @@ async def check_outbound(self):
                                         continue
                                     
                                     logging.info(f"✅ [Outbound] User {partner_id} passed ad check ({ad_count} ads). Evaluating trade...")
+                                    # --------------------------------------------------
 
                                     giving_items, receiving_items, item_ids_giver, item_ids_receiver, trade_json = await trade_info(self, trade["id"])
 
@@ -83,7 +85,7 @@ async def check_outbound(self):
                                 except Exception as e:
                                     logging.error(f"❌ Error processing outbound trade {trade['id']}: {e}")
                                 finally:
-                                    await asyncio.sleep(5)
+                                    await asyncio.sleep(1) # Small delay between trades
 
                             next_page_cursor = json_data.get("nextPageCursor")
                             if not next_page_cursor:
@@ -104,7 +106,7 @@ async def check_outbound(self):
                         break
                 finally:
                     await asyncio.sleep(10)
-
+                    
 async def check_inbound(self):
     while True:
         next_page_cursor = ""
@@ -123,11 +125,11 @@ async def check_inbound(self):
                             json_data = await response.json()
                             for trade in json_data.get("data", []):
                                 try:
-                                    # check ad count
+                                    # --- CHECK AD COUNT (Throttled via rolimon.py) ---
                                     partner_info = trade['user']
                                     partner_id = partner_info['id']
 
-                                    logging.info(f"🔍 [Inbound] Checking ad count for partner {partner_id}...")
+                                    # This call will now sleep for 3s if it hits the API
                                     ad_count = await rolimon.get_player_ad_count(partner_id)
 
                                     if ad_count > self.max_trade_ads:
@@ -136,6 +138,7 @@ async def check_inbound(self):
                                         continue
 
                                     logging.info(f"✅ [Inbound] User {partner_id} passed ad check ({ad_count} ads). Evaluating trade...")
+                                    # --------------------------------------------------
 
                                     giving_items, receiving_items, item_ids_giver, item_ids_receiver, trade_json = await trade_info(self, trade["id"])
 
@@ -205,7 +208,7 @@ async def check_inbound(self):
                                         else:
                                             logging.warning(f"⚠️ Failed to decline trade {trade['id']}: {message}")
                                 finally:
-                                    await asyncio.sleep(self.sleep_time_trade_send)
+                                    await asyncio.sleep(1) # Small delay between trades
 
                             next_page_cursor = json_data.get("nextPageCursor")
                             if not next_page_cursor:
@@ -226,7 +229,7 @@ async def check_inbound(self):
                         break
                 finally:
                     await asyncio.sleep(10)
-
+                    
 async def trade_info(self, trade_id):
     giving_items, receiving_items, item_ids_giver, item_ids_receiver = [], [], [], []
 
@@ -473,6 +476,7 @@ async def generate_trade(self, user_id, counter=False):
             'receiving_score': best_trade_info['receiving_score']
         }
     else:
+        logging.info(f"📉 No profitable trade found for user {user_id} that matches current settings.")
         return None
 
 
