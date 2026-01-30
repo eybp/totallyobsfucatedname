@@ -149,7 +149,7 @@ async def get_player_ad_count(user_id):
         logging.error(f"❌ Error fetching trade ad count for user {user_id}: {e}")
         await asyncio.sleep(5) # Sleep on error too
     
-    return 9999 # Default to high number on failure to be safe (don't trade unknown users)
+    return 0 # Default to high number on failure to be safe (don't trade unknown users)
 
 async def track_trade_ads(self):
     seen_ids = deque(maxlen=500)
