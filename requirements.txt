@@ -1,0 +1,7 @@
+aiohttp
+requests
+pyotp
+apscheduler
+aiofiles
+pystray
+Pillow
