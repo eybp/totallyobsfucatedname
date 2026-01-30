@@ -108,7 +108,9 @@ async def limiteds():
 async def get_player_ad_count(user_id):
     """
     Fetches the user's Rolimons profile to get their current active trade ad count.
-    Includes caching and Mandatory Rate Limiting.
+    - Returns 0 if user not found (inexperienced).
+    - Returns 0 if 429/Error (fail-open to allow trading).
+    - Includes caching and throttling.
     """
     current_time = time.time()
     
@@ -125,7 +127,6 @@ async def get_player_ad_count(user_id):
             async with session.get(url) as response:
                 
                 # CRITICAL: Always sleep after a request to prevent bursting
-                # We sleep BEFORE returning to ensure the caller waits
                 await asyncio.sleep(3.0) 
 
                 if response.status == 200:
@@ -140,17 +141,27 @@ async def get_player_ad_count(user_id):
                         # Update Cache
                         AD_COUNT_CACHE[user_id] = (current_time, count)
                         return count
+                    else:
+                        # CASE: User exists on Roblox but has no Rolimons data/profile
+                        # This implies they are inexperienced/new to trading.
+                        logging.info(f"ℹ️ User {user_id} has no Rolimons data. Assuming 0 ads.")
+                        AD_COUNT_CACHE[user_id] = (current_time, 0)
+                        return 0
+
                 elif response.status == 429:
-                    logging.warning(f"⚠️ 429 Too Many Requests from Rolimons for user {user_id}. Cooling down...")
-                    await asyncio.sleep(30) # Long sleep on 429
-                    return 9999 # Return high number to skip this user safely
+                    logging.warning(f"⚠️ 429 Too Many Requests from Rolimons. Cooling down... (Defaulting to 0 ads for user {user_id})")
+                    # We still sleep to respect the limit, but we allow the trade logic to proceed.
+                    await asyncio.sleep(30) 
+                    return 0 
 
     except Exception as e:
         logging.error(f"❌ Error fetching trade ad count for user {user_id}: {e}")
-        await asyncio.sleep(5) # Sleep on error too
+        await asyncio.sleep(5) 
     
-    return 0 # default to 0
-
+    # CASE: Any other error or failure
+    # Default to 0 so we don't filter out potential targets on network errors
+    return 0
+    
 async def track_trade_ads(self):
     seen_ids = deque(maxlen=500)
     logging.info(f"👀 Trade Ad Tracker started. Filter: Users with <= {self.max_trade_ads} active ads.")
