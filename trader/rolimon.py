@@ -118,8 +118,8 @@ async def get_player_ad_count(user_id):
     except Exception as e:
         logging.error(f"❌ Error fetching trade ad count for user {user_id}: {e}")
     
-    # we return -1 (or high number)
-    return 9999
+    # assume no ads
+    return 0
 
 async def track_trade_ads(self):
     seen_ids = deque(maxlen=500)
