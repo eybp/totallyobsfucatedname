@@ -1,9 +1,8 @@
-tweaked to be slightly better.
+Tweaked to be slightly better.
 
-used ai for sum stuff cause math is hard
+Star this and his here! https://github.com/efenatuyo/roblox-trade-bot
 
-star this and his here https://github.com/efenatuyo/roblox-trade-bot
-
+DISCLAIMER: Contains AI-Generated code
 # Setup
 
 1. **Install Python**  
