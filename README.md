@@ -1,6 +1,6 @@
 Tweaked to be slightly better.
 - Allows filtering trade partners by Rolimon Ad Count
-- Includes handling for rate-limiting, holding period items, and trade limits.
+- Includes handling for rate-limiting, holding period items, and trade limits
 - Optimized trading algorithm
 - More detailed webhook proofs
 Star this and his here! https://github.com/efenatuyo/roblox-trade-bot
