@@ -3,6 +3,7 @@ Tweaked to be slightly better.
 - Includes handling for rate-limiting, holding period items, and trade limits
 - Optimized trading algorithm
 - More detailed webhook proofs
+
 Star this and his here! https://github.com/efenatuyo/roblox-trade-bot
 
 DISCLAIMER: Contains AI-Generated code
